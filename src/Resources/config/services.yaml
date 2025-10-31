@@ -1,0 +1,16 @@
+services:
+  _defaults:
+    autowire: true
+    autoconfigure: true
+    public: false
+
+  Tourze\HttpRequestTaskBundle\Repository\:
+    resource: '../../Repository/'
+  Tourze\HttpRequestTaskBundle\Command\:
+    resource: '../../Command/'
+  Tourze\HttpRequestTaskBundle\Controller\:
+    resource: '../../Controller/'
+  Tourze\HttpRequestTaskBundle\MessageHandler\:
+    resource: '../../MessageHandler/'
+  Tourze\HttpRequestTaskBundle\Service\:
+    resource: '../../Service/'
