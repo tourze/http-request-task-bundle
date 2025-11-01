@@ -30,7 +30,7 @@
     "tourze/bundle-dependency": "1.*",
     "tourze/doctrine-indexed-bundle": "1.0.*",
     "tourze/easy-admin-menu-bundle": "1.0.*",
-    "tourze/symfony-dependency-service-loader": "1.*"
+    "tourze/symfony-dependency-service-loader": "1.0.*"
   },
   "require-dev": {
     "doctrine/data-fixtures": "^2.0",
