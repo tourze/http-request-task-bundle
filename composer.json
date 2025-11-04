@@ -26,7 +26,7 @@
     "symfony/rate-limiter": "^7.3",
     "symfony/twig-bundle": "^7.3",
     "symfony/yaml": "^7.3",
-    "tourze/async-contracts": "0.0.*",
+    "tourze/async-contracts": "1.0.*",
     "tourze/bundle-dependency": "1.*",
     "tourze/doctrine-indexed-bundle": "1.0.*",
     "tourze/easy-admin-menu-bundle": "1.0.*",
