@@ -13,7 +13,7 @@ use Tourze\PHPUnitSymfonyKernelTest\Attribute\AsRepository;
  * @extends ServiceEntityRepository<HttpRequestTask>
  */
 #[AsRepository(entityClass: HttpRequestTask::class)]
-class HttpRequestTaskRepository extends ServiceEntityRepository
+final class HttpRequestTaskRepository extends ServiceEntityRepository
 {
     public function __construct(ManagerRegistry $registry)
     {
@@ -43,7 +43,6 @@ class HttpRequestTaskRepository extends ServiceEntityRepository
      */
     public function findPendingTasks(int $limit = 100): array
     {
-        /** @phpstan-ignore return.type */
         return $this->createQueryBuilder('t')
             ->where('t.status = :status')
             ->andWhere('t.scheduledTime IS NULL OR t.scheduledTime <= :now')
@@ -62,7 +61,6 @@ class HttpRequestTaskRepository extends ServiceEntityRepository
      */
     public function findFailedTasks(int $limit = 100): array
     {
-        /** @phpstan-ignore return.type */
         return $this->createQueryBuilder('t')
             ->where('t.status = :status')
             ->setParameter('status', HttpRequestTask::STATUS_FAILED)
@@ -78,7 +76,6 @@ class HttpRequestTaskRepository extends ServiceEntityRepository
      */
     public function findTasksByStatus(string $status, int $limit = 100): array
     {
-        /** @phpstan-ignore return.type */
         return $this->createQueryBuilder('t')
             ->where('t.status = :status')
             ->setParameter('status', $status)
@@ -91,7 +88,6 @@ class HttpRequestTaskRepository extends ServiceEntityRepository
 
     public function findByUuid(string $uuid): ?HttpRequestTask
     {
-        /** @phpstan-ignore return.type */
         return $this->createQueryBuilder('t')
             ->where('t.uuid = :uuid')
             ->setParameter('uuid', $uuid)
@@ -116,7 +112,6 @@ class HttpRequestTaskRepository extends ServiceEntityRepository
      */
     public function findExpiredTasks(\DateTimeImmutable $before, int $limit = 100): array
     {
-        /** @phpstan-ignore return.type */
         return $this->createQueryBuilder('t')
             ->where('t.status IN (:statuses)')
             ->andWhere('t.createdTime < :before')
@@ -151,7 +146,6 @@ class HttpRequestTaskRepository extends ServiceEntityRepository
             ;
         }
 
-        /** @phpstan-ignore return.type */
         return $qb->getQuery()->getResult();
     }
 
@@ -160,7 +154,6 @@ class HttpRequestTaskRepository extends ServiceEntityRepository
      */
     public function findRetriableTasks(int $limit = 100): array
     {
-        /** @phpstan-ignore return.type */
         return $this->createQueryBuilder('t')
             ->where('t.status = :status')
             ->andWhere('t.attempts < t.maxAttempts')
@@ -178,7 +171,6 @@ class HttpRequestTaskRepository extends ServiceEntityRepository
      */
     public function findByUrl(string $url, int $limit = 100): array
     {
-        /** @phpstan-ignore return.type */
         return $this->createQueryBuilder('t')
             ->where('t.url LIKE :url')
             ->setParameter('url', '%' . $url . '%')
@@ -237,7 +229,6 @@ class HttpRequestTaskRepository extends ServiceEntityRepository
      */
     public function findByPriority(int $priority, int $limit = 100): array
     {
-        /** @phpstan-ignore return.type */
         return $this->createQueryBuilder('t')
             ->where('t.priority = :priority')
             ->setParameter('priority', $priority)
@@ -253,7 +244,6 @@ class HttpRequestTaskRepository extends ServiceEntityRepository
      */
     public function findProcessingTasks(int $limit = 100): array
     {
-        /** @phpstan-ignore return.type */
         return $this->createQueryBuilder('t')
             ->where('t.status = :status')
             ->setParameter('status', HttpRequestTask::STATUS_PROCESSING)

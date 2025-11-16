@@ -14,7 +14,7 @@ use Tourze\PHPUnitSymfonyKernelTest\Attribute\AsRepository;
  * @extends ServiceEntityRepository<HttpRequestLog>
  */
 #[AsRepository(entityClass: HttpRequestLog::class)]
-class HttpRequestLogRepository extends ServiceEntityRepository
+final class HttpRequestLogRepository extends ServiceEntityRepository
 {
     public function __construct(ManagerRegistry $registry)
     {
@@ -44,7 +44,6 @@ class HttpRequestLogRepository extends ServiceEntityRepository
      */
     public function findByTask(HttpRequestTask $task): array
     {
-        /** @phpstan-ignore return.type */
         return $this->createQueryBuilder('l')
             ->where('l.task = :task')
             ->setParameter('task', $task)
@@ -59,7 +58,6 @@ class HttpRequestLogRepository extends ServiceEntityRepository
      */
     public function findRecentLogs(int $limit = 100): array
     {
-        /** @phpstan-ignore return.type */
         return $this->createQueryBuilder('l')
             ->orderBy('l.executedTime', 'DESC')
             ->setMaxResults($limit)
@@ -73,7 +71,6 @@ class HttpRequestLogRepository extends ServiceEntityRepository
      */
     public function findFailedLogs(int $limit = 100): array
     {
-        /** @phpstan-ignore return.type */
         return $this->createQueryBuilder('l')
             ->where('l.result != :success')
             ->setParameter('success', HttpRequestLog::RESULT_SUCCESS)
@@ -86,7 +83,6 @@ class HttpRequestLogRepository extends ServiceEntityRepository
 
     public function getLatestLogForTask(HttpRequestTask $task): ?HttpRequestLog
     {
-        /** @phpstan-ignore return.type */
         return $this->createQueryBuilder('l')
             ->where('l.task = :task')
             ->setParameter('task', $task)
@@ -102,7 +98,6 @@ class HttpRequestLogRepository extends ServiceEntityRepository
      */
     public function findExpiredLogs(\DateTimeImmutable $before, int $limit = 100): array
     {
-        /** @phpstan-ignore return.type */
         return $this->createQueryBuilder('l')
             ->where('l.createdTime < :before')
             ->setParameter('before', $before)
@@ -118,7 +113,6 @@ class HttpRequestLogRepository extends ServiceEntityRepository
      */
     public function findByResult(string $result, int $limit = 100): array
     {
-        /** @phpstan-ignore return.type */
         return $this->createQueryBuilder('l')
             ->where('l.result = :result')
             ->setParameter('result', $result)
