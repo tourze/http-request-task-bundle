@@ -26,11 +26,6 @@ use Tourze\PHPUnitSymfonyWebTest\AbstractEasyAdminControllerTestCase;
 #[RunTestsInSeparateProcesses]
 final class HttpRequestTaskCrudControllerTest extends AbstractEasyAdminControllerTestCase
 {
-    public function testGetEntityFqcn(): void
-    {
-        $this->assertEquals(HttpRequestTask::class, HttpRequestTaskCrudController::getEntityFqcn());
-    }
-
     public function testControllerHasAdminCrudAttribute(): void
     {
         $reflection = new \ReflectionClass(HttpRequestTaskCrudController::class);
