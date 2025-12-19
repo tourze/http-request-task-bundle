@@ -6,7 +6,7 @@ namespace Tourze\HttpRequestTaskBundle\DependencyInjection;
 
 use Tourze\SymfonyDependencyServiceLoader\AutoExtension;
 
-class HttpRequestTaskExtension extends AutoExtension
+final class HttpRequestTaskExtension extends AutoExtension
 {
     protected function getConfigDir(): string
     {

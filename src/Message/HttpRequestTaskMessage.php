@@ -6,7 +6,7 @@ namespace Tourze\HttpRequestTaskBundle\Message;
 
 use Tourze\AsyncContracts\AsyncMessageInterface;
 
-class HttpRequestTaskMessage implements AsyncMessageInterface
+final class HttpRequestTaskMessage implements AsyncMessageInterface
 {
     private int $taskId;
 

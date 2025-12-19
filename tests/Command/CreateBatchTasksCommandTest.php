@@ -7,9 +7,11 @@ namespace Tourze\HttpRequestTaskBundle\Tests\Command;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use Symfony\Component\Console\Tester\CommandTester;
+use Symfony\Component\Messenger\Envelope;
+use Symfony\Component\Messenger\MessageBusInterface;
 use Tourze\HttpRequestTaskBundle\Command\CreateBatchTasksCommand;
 use Tourze\HttpRequestTaskBundle\Entity\HttpRequestTask;
-use Tourze\HttpRequestTaskBundle\Service\BatchTaskService;
+use Tourze\HttpRequestTaskBundle\Repository\HttpRequestTaskRepository;
 use Tourze\PHPUnitSymfonyKernelTest\AbstractCommandTestCase;
 
 /**
@@ -19,19 +21,42 @@ use Tourze\PHPUnitSymfonyKernelTest\AbstractCommandTestCase;
 #[RunTestsInSeparateProcesses]
 final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
 {
-    private BatchTaskService $batchTaskService;
+    private HttpRequestTaskRepository $taskRepository;
 
     private string $testDataDir;
 
     protected function onSetUp(): void
     {
-        $this->batchTaskService = $this->createMock(BatchTaskService::class);
+        $this->taskRepository = self::getService(HttpRequestTaskRepository::class);
 
-        // Replace service in container
-        self::getContainer()->set(BatchTaskService::class, $this->batchTaskService);
+        // 替换 MessageBus 为一个 no-op 实现，避免任务被实际执行
+        $nullMessageBus = new class implements MessageBusInterface {
+            public function dispatch(object $message, array $stamps = []): Envelope
+            {
+                return new Envelope($message, $stamps);
+            }
+        };
+        self::getContainer()->set(MessageBusInterface::class, $nullMessageBus);
+
+        // 清空所有任务数据（包括 fixtures 加载的数据）
+        $em = self::getEntityManager();
+        $em->createQuery('DELETE FROM ' . HttpRequestTask::class)->execute();
+        $em->clear();
 
         $this->testDataDir = sys_get_temp_dir() . '/http-request-task-test-' . uniqid();
         mkdir($this->testDataDir);
+    }
+
+    protected function onTearDown(): void
+    {
+        // 清理临时文件
+        if (is_dir($this->testDataDir)) {
+            $files = glob($this->testDataDir . '/*');
+            if (false !== $files) {
+                array_map('unlink', $files);
+            }
+            rmdir($this->testDataDir);
+        }
     }
 
     protected function getCommandTester(): CommandTester
@@ -52,17 +77,6 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
             ],
         ]));
 
-        $tasks = [
-            $this->createMockTask(1),
-            $this->createMockTask(2),
-            $this->createMockTask(3),
-        ];
-
-        $this->batchTaskService->expects($this->once())
-            ->method('createBatch')
-            ->willReturn($tasks)
-        ;
-
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
             'type' => 'urls',
@@ -70,8 +84,16 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Created 3 tasks successfully', $output);
-        $this->assertEquals(0, $commandTester->getStatusCode());
+        self::assertStringContainsString('Created 3 tasks successfully', $output);
+        self::assertEquals(0, $commandTester->getStatusCode());
+
+        // 验证任务已创建到数据库
+        $tasks = $this->taskRepository->findAll();
+        self::assertCount(3, $tasks);
+        self::assertEquals('https://api.example.com/1', $tasks[0]->getUrl());
+        self::assertEquals('https://api.example.com/2', $tasks[1]->getUrl());
+        self::assertEquals('https://api.example.com/3', $tasks[2]->getUrl());
+        self::assertEquals(HttpRequestTask::STATUS_PENDING, $tasks[0]->getStatus());
     }
 
     public function testCreateApiCallsFile(): void
@@ -91,25 +113,25 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
             ],
         ]));
 
-        $tasks = [
-            $this->createMockTask(1),
-            $this->createMockTask(2),
-        ];
-
-        $this->batchTaskService->expects($this->once())
-            ->method('createBatch')
-            ->willReturn($tasks)
-        ;
-
+        // 注意：必须指定 --method POST，否则 commonOptions 的默认 GET 会覆盖 endpoint 中的 method
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
             'type' => 'api',
             'source' => $apiFile,
+            '--method' => 'POST',
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Created 2 tasks successfully', $output);
-        $this->assertEquals(0, $commandTester->getStatusCode());
+        self::assertStringContainsString('Created 2 tasks successfully', $output);
+        self::assertEquals(0, $commandTester->getStatusCode());
+
+        // 验证任务已创建
+        $tasks = $this->taskRepository->findAll();
+        self::assertCount(2, $tasks);
+        self::assertEquals('https://api.example.com/users', $tasks[0]->getUrl());
+        self::assertEquals('POST', $tasks[0]->getMethod());
+        self::assertEquals('{"name":"John"}', $tasks[0]->getBody());
+        self::assertEquals('application/json', $tasks[0]->getContentType());
     }
 
     public function testCreateWebhookEventsFile(): void
@@ -123,39 +145,29 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
             ],
         ]));
 
-        $tasks = [
-            $this->createMockTask(1),
-            $this->createMockTask(2),
-        ];
-
-        $this->batchTaskService->expects($this->once())
-            ->method('createBatch')
-            ->willReturn($tasks)
-        ;
-
+        // 注意：必须指定 --method POST，否则 commonOptions 的默认 GET 会覆盖 webhook 的 POST
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
             'type' => 'webhook',
             'source' => $webhookFile,
+            '--method' => 'POST',
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Created 2 tasks successfully', $output);
-        $this->assertEquals(0, $commandTester->getStatusCode());
+        self::assertStringContainsString('Created 2 tasks successfully', $output);
+        self::assertEquals(0, $commandTester->getStatusCode());
+
+        // 验证任务已创建
+        $tasks = $this->taskRepository->findAll();
+        self::assertCount(2, $tasks);
+        self::assertEquals('https://webhook.example.com/events', $tasks[0]->getUrl());
+        self::assertEquals('POST', $tasks[0]->getMethod());
+        self::assertArrayHasKey('X-Event-Type', $tasks[0]->getHeaders());
+        self::assertEquals('user.created', $tasks[0]->getHeaders()['X-Event-Type']);
     }
 
     public function testCreateScheduledTasks(): void
     {
-        $tasks = [];
-        for ($i = 1; $i <= 10; ++$i) {
-            $tasks[] = $this->createMockTask($i);
-        }
-
-        $this->batchTaskService->expects($this->once())
-            ->method('createBatch')
-            ->willReturn($tasks)
-        ;
-
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
             'type' => 'scheduled',
@@ -165,8 +177,20 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Created 10 tasks successfully', $output);
-        $this->assertEquals(0, $commandTester->getStatusCode());
+        self::assertStringContainsString('Created 10 tasks successfully', $output);
+        self::assertEquals(0, $commandTester->getStatusCode());
+
+        // 验证任务已创建
+        $tasks = $this->taskRepository->findAll();
+        self::assertCount(10, $tasks);
+        self::assertEquals('https://api.example.com/cron', $tasks[0]->getUrl());
+
+        // 验证定时任务的时间间隔
+        $firstTime = $tasks[0]->getScheduledTime();
+        $secondTime = $tasks[1]->getScheduledTime();
+        self::assertInstanceOf(\DateTimeImmutable::class, $firstTime);
+        self::assertInstanceOf(\DateTimeImmutable::class, $secondTime);
+        self::assertEquals(60, $secondTime->getTimestamp() - $firstTime->getTimestamp());
     }
 
     public function testCreateWithCustomOptions(): void
@@ -175,13 +199,6 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
         file_put_contents($urlsFile, json_encode([
             'urls' => ['https://api.example.com/test'],
         ]));
-
-        $task = $this->createMockTask(1);
-
-        $this->batchTaskService->expects($this->once())
-            ->method('createBatch')
-            ->willReturn([$task])
-        ;
 
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
@@ -194,8 +211,16 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Created 1 tasks successfully', $output);
-        $this->assertEquals(0, $commandTester->getStatusCode());
+        self::assertStringContainsString('Created 1 tasks successfully', $output);
+        self::assertEquals(0, $commandTester->getStatusCode());
+
+        // 验证自定义选项
+        $tasks = $this->taskRepository->findAll();
+        self::assertCount(1, $tasks);
+        self::assertEquals('POST', $tasks[0]->getMethod());
+        self::assertEquals(HttpRequestTask::PRIORITY_HIGH, $tasks[0]->getPriority());
+        self::assertEquals(60, $tasks[0]->getTimeout());
+        self::assertEquals(5, $tasks[0]->getMaxAttempts());
     }
 
     public function testCreateWithDryRun(): void
@@ -208,10 +233,6 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
             ],
         ]));
 
-        $this->batchTaskService->expects($this->never())
-            ->method('createBatch')
-        ;
-
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
             'type' => 'urls',
@@ -220,10 +241,14 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('DRY RUN MODE', $output);
-        $this->assertStringContainsString('Tasks to be created', $output);
-        $this->assertStringContainsString('Would create 2 tasks', $output);
-        $this->assertEquals(0, $commandTester->getStatusCode());
+        self::assertStringContainsString('DRY RUN MODE', $output);
+        self::assertStringContainsString('Tasks to be created', $output);
+        self::assertStringContainsString('Would create 2 tasks', $output);
+        self::assertEquals(0, $commandTester->getStatusCode());
+
+        // 验证没有任务被创建（dry-run 模式下不应该创建任务）
+        $tasks = $this->taskRepository->findAll();
+        self::assertCount(0, $tasks);
     }
 
     public function testInvalidBatchType(): void
@@ -235,8 +260,8 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Unknown batch type: invalid', $output);
-        $this->assertEquals(1, $commandTester->getStatusCode());
+        self::assertStringContainsString('Unknown batch type: invalid', $output);
+        self::assertEquals(1, $commandTester->getStatusCode());
     }
 
     public function testFileNotFound(): void
@@ -248,8 +273,8 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('File not found', $output);
-        $this->assertEquals(1, $commandTester->getStatusCode());
+        self::assertStringContainsString('File not found', $output);
+        self::assertEquals(1, $commandTester->getStatusCode());
     }
 
     public function testInvalidJsonFormat(): void
@@ -264,8 +289,8 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Invalid JSON format', $output);
-        $this->assertEquals(1, $commandTester->getStatusCode());
+        self::assertStringContainsString('Invalid JSON format', $output);
+        self::assertEquals(1, $commandTester->getStatusCode());
     }
 
     public function testArgumentType(): void
@@ -278,16 +303,6 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
             ],
         ]));
 
-        $tasks = [
-            $this->createMockTask(1),
-            $this->createMockTask(2),
-        ];
-
-        $this->batchTaskService->expects($this->once())
-            ->method('createBatch')
-            ->willReturn($tasks)
-        ;
-
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
             'type' => 'urls',
@@ -295,8 +310,12 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Created 2 tasks successfully', $output);
-        $this->assertEquals(0, $commandTester->getStatusCode());
+        self::assertStringContainsString('Created 2 tasks successfully', $output);
+        self::assertEquals(0, $commandTester->getStatusCode());
+
+        // 验证任务已创建
+        $tasks = $this->taskRepository->findAll();
+        self::assertCount(2, $tasks);
     }
 
     public function testArgumentSource(): void
@@ -309,16 +328,6 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
             ],
         ]));
 
-        $tasks = [
-            $this->createMockTask(1),
-            $this->createMockTask(2),
-        ];
-
-        $this->batchTaskService->expects($this->once())
-            ->method('createBatch')
-            ->willReturn($tasks)
-        ;
-
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
             'type' => 'urls',
@@ -326,8 +335,12 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Created 2 tasks successfully', $output);
-        $this->assertEquals(0, $commandTester->getStatusCode());
+        self::assertStringContainsString('Created 2 tasks successfully', $output);
+        self::assertEquals(0, $commandTester->getStatusCode());
+
+        // 验证任务已创建
+        $tasks = $this->taskRepository->findAll();
+        self::assertCount(2, $tasks);
     }
 
     public function testOptionMethod(): void
@@ -340,16 +353,6 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
             ],
         ]));
 
-        $tasks = [
-            $this->createMockTask(1),
-            $this->createMockTask(2),
-        ];
-
-        $this->batchTaskService->expects($this->once())
-            ->method('createBatch')
-            ->willReturn($tasks)
-        ;
-
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
             'type' => 'urls',
@@ -358,8 +361,14 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Created 2 tasks successfully', $output);
-        $this->assertEquals(0, $commandTester->getStatusCode());
+        self::assertStringContainsString('Created 2 tasks successfully', $output);
+        self::assertEquals(0, $commandTester->getStatusCode());
+
+        // 验证 method 选项
+        $tasks = $this->taskRepository->findAll();
+        self::assertCount(2, $tasks);
+        self::assertEquals('POST', $tasks[0]->getMethod());
+        self::assertEquals('POST', $tasks[1]->getMethod());
     }
 
     public function testOptionPriority(): void
@@ -372,16 +381,6 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
             ],
         ]));
 
-        $tasks = [
-            $this->createMockTask(1),
-            $this->createMockTask(2),
-        ];
-
-        $this->batchTaskService->expects($this->once())
-            ->method('createBatch')
-            ->willReturn($tasks)
-        ;
-
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
             'type' => 'urls',
@@ -390,8 +389,14 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Created 2 tasks successfully', $output);
-        $this->assertEquals(0, $commandTester->getStatusCode());
+        self::assertStringContainsString('Created 2 tasks successfully', $output);
+        self::assertEquals(0, $commandTester->getStatusCode());
+
+        // 验证 priority 选项
+        $tasks = $this->taskRepository->findAll();
+        self::assertCount(2, $tasks);
+        self::assertEquals(HttpRequestTask::PRIORITY_HIGH, $tasks[0]->getPriority());
+        self::assertEquals(HttpRequestTask::PRIORITY_HIGH, $tasks[1]->getPriority());
     }
 
     public function testOptionTimeout(): void
@@ -404,16 +409,6 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
             ],
         ]));
 
-        $tasks = [
-            $this->createMockTask(1),
-            $this->createMockTask(2),
-        ];
-
-        $this->batchTaskService->expects($this->once())
-            ->method('createBatch')
-            ->willReturn($tasks)
-        ;
-
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
             'type' => 'urls',
@@ -422,8 +417,14 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Created 2 tasks successfully', $output);
-        $this->assertEquals(0, $commandTester->getStatusCode());
+        self::assertStringContainsString('Created 2 tasks successfully', $output);
+        self::assertEquals(0, $commandTester->getStatusCode());
+
+        // 验证 timeout 选项
+        $tasks = $this->taskRepository->findAll();
+        self::assertCount(2, $tasks);
+        self::assertEquals(120, $tasks[0]->getTimeout());
+        self::assertEquals(120, $tasks[1]->getTimeout());
     }
 
     public function testOptionMaxAttempts(): void
@@ -436,16 +437,6 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
             ],
         ]));
 
-        $tasks = [
-            $this->createMockTask(1),
-            $this->createMockTask(2),
-        ];
-
-        $this->batchTaskService->expects($this->once())
-            ->method('createBatch')
-            ->willReturn($tasks)
-        ;
-
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
             'type' => 'urls',
@@ -454,23 +445,18 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Created 2 tasks successfully', $output);
-        $this->assertEquals(0, $commandTester->getStatusCode());
+        self::assertStringContainsString('Created 2 tasks successfully', $output);
+        self::assertEquals(0, $commandTester->getStatusCode());
+
+        // 验证 max-attempts 选项
+        $tasks = $this->taskRepository->findAll();
+        self::assertCount(2, $tasks);
+        self::assertEquals(5, $tasks[0]->getMaxAttempts());
+        self::assertEquals(5, $tasks[1]->getMaxAttempts());
     }
 
     public function testOptionScheduledTime(): void
     {
-        $tasks = [
-            $this->createMockTask(1),
-            $this->createMockTask(2),
-            $this->createMockTask(3),
-        ];
-
-        $this->batchTaskService->expects($this->once())
-            ->method('createBatch')
-            ->willReturn($tasks)
-        ;
-
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
             'type' => 'scheduled',
@@ -481,22 +467,19 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Created 3 tasks successfully', $output);
-        $this->assertEquals(0, $commandTester->getStatusCode());
+        self::assertStringContainsString('Created 3 tasks successfully', $output);
+        self::assertEquals(0, $commandTester->getStatusCode());
+
+        // 验证 scheduled-time 选项
+        $tasks = $this->taskRepository->findAll();
+        self::assertCount(3, $tasks);
+        $firstTime = $tasks[0]->getScheduledTime();
+        self::assertInstanceOf(\DateTimeImmutable::class, $firstTime);
+        self::assertEquals('2024-12-25 10:30:00', $firstTime->format('Y-m-d H:i:s'));
     }
 
     public function testOptionInterval(): void
     {
-        $tasks = [
-            $this->createMockTask(1),
-            $this->createMockTask(2),
-        ];
-
-        $this->batchTaskService->expects($this->once())
-            ->method('createBatch')
-            ->willReturn($tasks)
-        ;
-
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
             'type' => 'scheduled',
@@ -506,22 +489,21 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Created 2 tasks successfully', $output);
-        $this->assertEquals(0, $commandTester->getStatusCode());
+        self::assertStringContainsString('Created 2 tasks successfully', $output);
+        self::assertEquals(0, $commandTester->getStatusCode());
+
+        // 验证 interval 选项
+        $tasks = $this->taskRepository->findAll();
+        self::assertCount(2, $tasks);
+        $firstTime = $tasks[0]->getScheduledTime();
+        $secondTime = $tasks[1]->getScheduledTime();
+        self::assertInstanceOf(\DateTimeImmutable::class, $firstTime);
+        self::assertInstanceOf(\DateTimeImmutable::class, $secondTime);
+        self::assertEquals(300, $secondTime->getTimestamp() - $firstTime->getTimestamp());
     }
 
     public function testOptionCount(): void
     {
-        $tasks = [];
-        for ($i = 1; $i <= 5; ++$i) {
-            $tasks[] = $this->createMockTask($i);
-        }
-
-        $this->batchTaskService->expects($this->once())
-            ->method('createBatch')
-            ->willReturn($tasks)
-        ;
-
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
             'type' => 'scheduled',
@@ -531,8 +513,12 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Created 5 tasks successfully', $output);
-        $this->assertEquals(0, $commandTester->getStatusCode());
+        self::assertStringContainsString('Created 5 tasks successfully', $output);
+        self::assertEquals(0, $commandTester->getStatusCode());
+
+        // 验证 count 选项
+        $tasks = $this->taskRepository->findAll();
+        self::assertCount(5, $tasks);
     }
 
     public function testOptionDryRun(): void
@@ -546,10 +532,6 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
             ],
         ]));
 
-        $this->batchTaskService->expects($this->never())
-            ->method('createBatch')
-        ;
-
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
             'type' => 'urls',
@@ -558,20 +540,13 @@ final class CreateBatchTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('DRY RUN MODE', $output);
-        $this->assertStringContainsString('Tasks to be created', $output);
-        $this->assertStringContainsString('Would create 3 tasks', $output);
-        $this->assertEquals(0, $commandTester->getStatusCode());
-    }
+        self::assertStringContainsString('DRY RUN MODE', $output);
+        self::assertStringContainsString('Tasks to be created', $output);
+        self::assertStringContainsString('Would create 3 tasks', $output);
+        self::assertEquals(0, $commandTester->getStatusCode());
 
-    private function createMockTask(int $id): HttpRequestTask
-    {
-        $task = $this->createMock(HttpRequestTask::class);
-        $task->method('getId')->willReturn($id);
-        $task->method('getUuid')->willReturn('uuid-' . $id);
-        $task->method('getUrl')->willReturn('https://api.example.com/task-' . $id);
-        $task->method('getStatus')->willReturn(HttpRequestTask::STATUS_PENDING);
-
-        return $task;
+        // 验证没有任务被创建
+        $tasks = $this->taskRepository->findAll();
+        self::assertCount(0, $tasks);
     }
 }

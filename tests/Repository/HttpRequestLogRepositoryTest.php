@@ -227,12 +227,8 @@ final class HttpRequestLogRepositoryTest extends AbstractRepositoryTestCase
         $oldLog->setResult(HttpRequestLog::RESULT_SUCCESS);
         $oldLog->setExecutedTime(new \DateTimeImmutable('2023-01-01 10:00:00'));
 
-        // 使用反射设置 createdTime
-        /** @phpstan-ignore-next-line */
-        $reflection = new \ReflectionClass($oldLog);
-        $property = $reflection->getProperty('createdTime');
-        $property->setAccessible(true);
-        $property->setValue($oldLog, new \DateTimeImmutable('2023-01-01 10:00:00'));
+        // 设置 createdTime
+        $oldLog->setCreatedTimeForTesting(new \DateTimeImmutable('2023-01-01 10:00:00'));
 
         // 创建一个最近的日志记录
         $recentLog = new HttpRequestLog();
@@ -241,8 +237,8 @@ final class HttpRequestLogRepositoryTest extends AbstractRepositoryTestCase
         $recentLog->setResult(HttpRequestLog::RESULT_SUCCESS);
         $recentLog->setExecutedTime(new \DateTimeImmutable('2023-06-01 10:00:00'));
 
-        // 使用反射设置 createdTime
-        $property->setValue($recentLog, new \DateTimeImmutable('2023-06-01 10:00:00'));
+        // 设置 createdTime 为较新的日期
+        $recentLog->setCreatedTimeForTesting(new \DateTimeImmutable('2023-06-01 10:00:00'));
 
         self::getEntityManager()->persist($oldLog);
         self::getEntityManager()->persist($recentLog);
@@ -270,12 +266,8 @@ final class HttpRequestLogRepositoryTest extends AbstractRepositoryTestCase
         $oldLog->setResult(HttpRequestLog::RESULT_SUCCESS);
         $oldLog->setExecutedTime(new \DateTimeImmutable('2023-01-01 10:00:00'));
 
-        // 使用反射设置 createdTime 为旧日期
-        /** @phpstan-ignore-next-line */
-        $reflection = new \ReflectionClass($oldLog);
-        $property = $reflection->getProperty('createdTime');
-        $property->setAccessible(true);
-        $property->setValue($oldLog, new \DateTimeImmutable('2023-01-01 10:00:00'));
+        // 设置 createdTime 为旧日期
+        $oldLog->setCreatedTimeForTesting(new \DateTimeImmutable('2023-01-01 10:00:00'));
 
         $recentLog = new HttpRequestLog();
         $recentLog->setTask($task);

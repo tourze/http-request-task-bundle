@@ -19,7 +19,7 @@ use Tourze\HttpRequestTaskBundle\Service\HttpRequestTaskService;
     name: self::NAME,
     description: 'Retry failed HTTP request tasks'
 )]
-class RetryFailedTasksCommand extends Command
+final class RetryFailedTasksCommand extends Command
 {
     public const NAME = 'http-request-task:retry-failed';
 

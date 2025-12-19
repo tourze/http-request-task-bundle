@@ -10,7 +10,7 @@ use Doctrine\ORM\Events;
 use Tourze\HttpRequestTaskBundle\Entity\HttpRequestTask;
 
 #[AsEntityListener(event: Events::preUpdate, method: 'preUpdate', entity: HttpRequestTask::class)]
-class HttpRequestTaskUpdateListener
+final class HttpRequestTaskUpdateListener
 {
     public function preUpdate(HttpRequestTask $task, PreUpdateEventArgs $args): void
     {

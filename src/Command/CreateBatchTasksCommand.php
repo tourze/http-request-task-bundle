@@ -19,7 +19,7 @@ use Tourze\HttpRequestTaskBundle\Service\BatchTaskService;
     name: self::NAME,
     description: 'Create batch HTTP request tasks'
 )]
-class CreateBatchTasksCommand extends Command
+final class CreateBatchTasksCommand extends Command
 {
     public const NAME = 'http-request-task:create-batch';
 

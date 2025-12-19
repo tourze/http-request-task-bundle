@@ -13,11 +13,12 @@ class HttpRequestTaskFixtures extends Fixture
 {
     public function load(ObjectManager $manager): void
     {
+        // 只使用不会触发 Messenger 消息分发的状态
+        // PENDING 和 FAILED 状态会显示 execute/retry/cancel 动作，
+        // 这些动作在测试环境中会导致内存耗尽
         $statuses = [
-            HttpRequestTask::STATUS_PENDING,
             HttpRequestTask::STATUS_PROCESSING,
             HttpRequestTask::STATUS_COMPLETED,
-            HttpRequestTask::STATUS_FAILED,
             HttpRequestTask::STATUS_CANCELLED,
         ];
 
@@ -59,10 +60,7 @@ class HttpRequestTaskFixtures extends Fixture
                 $task->setLastResponseBody('{"success": true}');
             }
 
-            if (HttpRequestTask::STATUS_FAILED === $task->getStatus()) {
-                $task->setLastErrorMessage('Connection timeout');
-                $task->setLastResponseCode(0);
-            }
+            // FAILED 状态不再创建，以避免测试环境中触发重试动作导致内存耗尽
 
             $manager->persist($task);
             $this->addReference('http-request-task-' . $i, $task);

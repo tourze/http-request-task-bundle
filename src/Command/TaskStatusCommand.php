@@ -21,7 +21,7 @@ use Tourze\HttpRequestTaskBundle\Service\HttpRequestTaskService;
     name: self::NAME,
     description: 'Display HTTP request tasks status'
 )]
-class TaskStatusCommand extends Command
+final class TaskStatusCommand extends Command
 {
     public const NAME = 'http-request-task:status';
 

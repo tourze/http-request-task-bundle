@@ -4,12 +4,12 @@ declare(strict_types=1);
 
 namespace Tourze\HttpRequestTaskBundle\Tests\Service;
 
-use Doctrine\Persistence\ManagerRegistry;
+use Doctrine\ORM\EntityManagerInterface;
 use PHPUnit\Framework\Attributes\CoversClass;
-use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
+use Symfony\Component\HttpClient\MockHttpClient;
+use Symfony\Component\HttpClient\Response\MockResponse;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
-use Symfony\Contracts\HttpClient\ResponseInterface;
-use Symfony\Contracts\HttpClient\ResponseStreamInterface;
 use Tourze\HttpRequestTaskBundle\Entity\HttpRequestLog;
 use Tourze\HttpRequestTaskBundle\Entity\HttpRequestTask;
 use Tourze\HttpRequestTaskBundle\Exception\TaskExecutionException;
@@ -19,59 +19,31 @@ use Tourze\HttpRequestTaskBundle\Service\HttpRequestExecutor;
 use Tourze\HttpRequestTaskBundle\Service\HttpRequestTaskConfigService;
 use Tourze\HttpRequestTaskBundle\Service\ResponseBodyTruncator;
 use Tourze\HttpRequestTaskBundle\Service\TaskRetryCalculator;
+use Tourze\PHPUnitSymfonyKernelTest\AbstractIntegrationTestCase;
+use Symfony\Component\DependencyInjection\Definition;
 
 /**
  * @internal
- *
- * @phpstan-ignore method.notFound
  */
 #[CoversClass(HttpRequestExecutor::class)]
-final class HttpRequestExecutorTest extends TestCase
+#[RunTestsInSeparateProcesses]
+final class HttpRequestExecutorTest extends AbstractIntegrationTestCase
 {
     private HttpRequestExecutor $executor;
-
-    private HttpClientInterface $httpClient;
-
     private HttpRequestTaskRepository $taskRepository;
-
     private HttpRequestLogRepository $logRepository;
 
-    private HttpRequestTaskConfigService $configService;
-
-    private ResponseBodyTruncator $bodyTruncator;
-
-    private TaskRetryCalculator $retryCalculator;
-
-    protected function setUp(): void
+    protected function onSetUp(): void
     {
-        parent::setUp();
-
-        // No additional setup needed
-    }
-
-    private function initializeTest(): void
-    {
-        $this->httpClient = $this->createHttpClient();
-        $this->taskRepository = $this->createTaskRepository();
-        $this->logRepository = $this->createLogRepository();
-        $this->configService = $this->createConfigService();
-        $this->bodyTruncator = $this->createBodyTruncator();
-        $this->retryCalculator = $this->createRetryCalculator();
-
-        $this->executor = new HttpRequestExecutor(
-            $this->httpClient,
-            $this->taskRepository,
-            $this->logRepository,
-            $this->configService,
-            $this->bodyTruncator,
-            $this->retryCalculator
-        );
+        $this->taskRepository = self::getService(HttpRequestTaskRepository::class);
+        $this->logRepository = self::getService(HttpRequestLogRepository::class);
     }
 
     public function testExecuteThrowsExceptionForCompletedTask(): void
     {
-        $this->initializeTest();
-        $task = $this->createTask(HttpRequestTask::STATUS_COMPLETED);
+        $task = $this->createAndPersistTask(HttpRequestTask::STATUS_COMPLETED);
+
+        $this->executor = $this->createExecutor();
 
         $this->expectException(TaskExecutionException::class);
         $this->expectExceptionMessage('Task has already been completed');
@@ -81,8 +53,9 @@ final class HttpRequestExecutorTest extends TestCase
 
     public function testExecuteThrowsExceptionForCancelledTask(): void
     {
-        $this->initializeTest();
-        $task = $this->createTask(HttpRequestTask::STATUS_CANCELLED);
+        $task = $this->createAndPersistTask(HttpRequestTask::STATUS_CANCELLED);
+
+        $this->executor = $this->createExecutor();
 
         $this->expectException(TaskExecutionException::class);
         $this->expectExceptionMessage('Task has been cancelled');
@@ -92,82 +65,95 @@ final class HttpRequestExecutorTest extends TestCase
 
     public function testExecuteSuccessfulRequest(): void
     {
-        $this->initializeTest();
-        $task = $this->createTask(HttpRequestTask::STATUS_PENDING);
+        $task = $this->createAndPersistTask(HttpRequestTask::STATUS_PENDING);
         $task->setUrl('https://api.example.com/test');
         $task->setMethod('GET');
         $task->setHeaders(['Accept' => 'application/json']);
         $task->setTimeout(30);
         $task->setAttempts(0);
+        self::getEntityManager()->flush();
 
-        $response = $this->createResponse(200, '{"success": true}', ['Content-Type' => ['application/json']]);
+        $mockClient = new MockHttpClient([
+            new MockResponse('{"success": true}', [
+                'http_code' => 200,
+                'response_headers' => ['Content-Type' => 'application/json'],
+            ]),
+        ]);
 
-        $this->setHttpClientResponse($response);
-
-        $saveCount = 0;
-        $this->setTaskRepositorySaveCallback(function (HttpRequestTask $t, bool $flush) use (&$saveCount): void {
-            ++$saveCount;
-        });
-
-        $this->setLogRepositorySaveCallback(function (HttpRequestLog $log, bool $flush): void {
-            // Log saved
-        });
+        $this->executor = $this->createExecutor($mockClient);
 
         $log = $this->executor->execute($task);
 
         $this->assertInstanceOf(HttpRequestLog::class, $log);
-        $this->assertSame(2, $saveCount); // Called twice during execution
+        $this->assertSame(HttpRequestLog::RESULT_SUCCESS, $log->getResult());
+        $this->assertSame(200, $log->getResponseCode());
+        $this->assertSame('{"success": true}', $log->getResponseBody());
+        $this->assertSame(HttpRequestTask::STATUS_COMPLETED, $task->getStatus());
+        $this->assertSame(1, $task->getAttempts());
+        $this->assertNotNull($task->getCompletedTime());
     }
 
     public function testExecuteFailedRequestWithRetry(): void
     {
-        $this->initializeTest();
-        $task = $this->createTask(HttpRequestTask::STATUS_PENDING);
+        $task = $this->createAndPersistTask(HttpRequestTask::STATUS_PENDING);
         $task->setUrl('https://api.example.com/fail');
         $task->setMethod('GET');
         $task->setTimeout(30);
         $task->setAttempts(0);
         $task->setMaxAttempts(3);
+        self::getEntityManager()->flush();
 
-        $response = $this->createResponse(500, 'Internal Server Error', ['Content-Type' => ['text/html']]);
-        $this->setHttpClientResponse($response);
-        $this->setRetryCalculatorCanRetry(true);
+        $mockClient = new MockHttpClient([
+            new MockResponse('Internal Server Error', [
+                'http_code' => 500,
+                'response_headers' => ['Content-Type' => 'text/html'],
+            ]),
+        ]);
 
-        $this->setTaskRepositorySaveCallback(function (): void {});
-        $this->setLogRepositorySaveCallback(function (): void {});
+        $this->executor = $this->createExecutor($mockClient);
 
         $log = $this->executor->execute($task);
 
         $this->assertInstanceOf(HttpRequestLog::class, $log);
+        $this->assertSame(HttpRequestLog::RESULT_FAILURE, $log->getResult());
+        $this->assertSame(500, $log->getResponseCode());
+        $this->assertSame(HttpRequestTask::STATUS_PENDING, $task->getStatus());
+        $this->assertSame(1, $task->getAttempts());
+        $this->assertNull($task->getCompletedTime());
     }
 
     public function testExecuteFailedRequestWithoutRetry(): void
     {
-        $this->initializeTest();
-        $task = $this->createTask(HttpRequestTask::STATUS_PENDING);
+        $task = $this->createAndPersistTask(HttpRequestTask::STATUS_PENDING);
         $task->setUrl('https://api.example.com/fail');
         $task->setMethod('GET');
         $task->setTimeout(30);
         $task->setAttempts(0);
         $task->setMaxAttempts(1);
+        self::getEntityManager()->flush();
 
-        $response = $this->createResponse(404, 'Not Found', ['Content-Type' => ['text/html']]);
-        $this->setHttpClientResponse($response);
-        $this->setRetryCalculatorCanRetry(false);
+        $mockClient = new MockHttpClient([
+            new MockResponse('Not Found', [
+                'http_code' => 404,
+                'response_headers' => ['Content-Type' => 'text/html'],
+            ]),
+        ]);
 
-        $this->setTaskRepositorySaveCallback(function (): void {});
-        $this->setLogRepositorySaveCallback(function (): void {});
+        $this->executor = $this->createExecutor($mockClient);
 
         $log = $this->executor->execute($task);
 
         $this->assertInstanceOf(HttpRequestLog::class, $log);
+        $this->assertSame(HttpRequestLog::RESULT_FAILURE, $log->getResult());
+        $this->assertSame(404, $log->getResponseCode());
         $this->assertSame(HttpRequestTask::STATUS_FAILED, $task->getStatus());
+        $this->assertSame(1, $task->getAttempts());
+        $this->assertNotNull($task->getCompletedTime());
     }
 
     public function testExecuteWithJsonBody(): void
     {
-        $this->initializeTest();
-        $task = $this->createTask(HttpRequestTask::STATUS_PENDING);
+        $task = $this->createAndPersistTask(HttpRequestTask::STATUS_PENDING);
         $task->setUrl('https://api.example.com/json');
         $task->setMethod('POST');
         $task->setHeaders(['Accept' => 'application/json']);
@@ -175,361 +161,291 @@ final class HttpRequestExecutorTest extends TestCase
         $task->setBody('{"name": "test", "value": 123}');
         $task->setContentType('application/json');
         $task->setAttempts(0);
+        self::getEntityManager()->flush();
 
-        $response = $this->createResponse(201, '{"id": 456}', ['Content-Type' => ['application/json']]);
-        $this->setHttpClientResponse($response);
+        $mockClient = new MockHttpClient([
+            new MockResponse('{"id": 456}', [
+                'http_code' => 201,
+                'response_headers' => ['Content-Type' => 'application/json'],
+            ]),
+        ]);
 
-        $this->setTaskRepositorySaveCallback(function (): void {});
-        $this->setLogRepositorySaveCallback(function (): void {});
+        $this->executor = $this->createExecutor($mockClient);
 
         $log = $this->executor->execute($task);
 
         $this->assertInstanceOf(HttpRequestLog::class, $log);
+        $this->assertSame(HttpRequestLog::RESULT_SUCCESS, $log->getResult());
+        $this->assertSame(201, $log->getResponseCode());
+        $this->assertSame('{"id": 456}', $log->getResponseBody());
+        $this->assertSame(HttpRequestTask::STATUS_COMPLETED, $task->getStatus());
     }
 
     public function testExecuteWithFormBody(): void
     {
-        $this->initializeTest();
-        $task = $this->createTask(HttpRequestTask::STATUS_PENDING);
+        $task = $this->createAndPersistTask(HttpRequestTask::STATUS_PENDING);
         $task->setUrl('https://api.example.com/form');
         $task->setMethod('POST');
         $task->setTimeout(30);
         $task->setBody('name=test&value=123');
         $task->setContentType('application/x-www-form-urlencoded');
         $task->setAttempts(0);
+        self::getEntityManager()->flush();
 
-        $response = $this->createResponse(200, 'OK', ['Content-Type' => ['text/plain']]);
-        $this->setHttpClientResponse($response);
+        $mockClient = new MockHttpClient([
+            new MockResponse('OK', [
+                'http_code' => 200,
+                'response_headers' => ['Content-Type' => 'text/plain'],
+            ]),
+        ]);
 
-        $this->setTaskRepositorySaveCallback(function (): void {});
-        $this->setLogRepositorySaveCallback(function (): void {});
+        $this->executor = $this->createExecutor($mockClient);
 
         $log = $this->executor->execute($task);
 
         $this->assertInstanceOf(HttpRequestLog::class, $log);
+        $this->assertSame(HttpRequestLog::RESULT_SUCCESS, $log->getResult());
+        $this->assertSame(200, $log->getResponseCode());
+        $this->assertSame('OK', $log->getResponseBody());
+        $this->assertSame(HttpRequestTask::STATUS_COMPLETED, $task->getStatus());
     }
 
     public function testExecuteWithRawBody(): void
     {
-        $this->initializeTest();
-        $task = $this->createTask(HttpRequestTask::STATUS_PENDING);
+        $task = $this->createAndPersistTask(HttpRequestTask::STATUS_PENDING);
         $task->setUrl('https://api.example.com/raw');
         $task->setMethod('PUT');
         $task->setTimeout(30);
         $task->setBody('raw text data');
         $task->setContentType('text/plain');
         $task->setAttempts(0);
+        self::getEntityManager()->flush();
 
-        $response = $this->createResponse(200, 'Updated', ['Content-Type' => ['text/plain']]);
-        $this->setHttpClientResponse($response);
+        $mockClient = new MockHttpClient([
+            new MockResponse('Updated', [
+                'http_code' => 200,
+                'response_headers' => ['Content-Type' => 'text/plain'],
+            ]),
+        ]);
 
-        $this->setTaskRepositorySaveCallback(function (): void {});
-        $this->setLogRepositorySaveCallback(function (): void {});
+        $this->executor = $this->createExecutor($mockClient);
 
         $log = $this->executor->execute($task);
 
         $this->assertInstanceOf(HttpRequestLog::class, $log);
+        $this->assertSame(HttpRequestLog::RESULT_SUCCESS, $log->getResult());
+        $this->assertSame(200, $log->getResponseCode());
+        $this->assertSame('Updated', $log->getResponseBody());
+        $this->assertSame(HttpRequestTask::STATUS_COMPLETED, $task->getStatus());
     }
 
     public function testSetRateLimiterFactory(): void
     {
-        $this->initializeTest();
+        $this->executor = $this->createExecutor();
 
         $this->executor->setRateLimiterFactory(null);
 
-        // Verify that the rate limiter factory was set to null
         $this->assertNull($this->executor->getRateLimiterFactory());
     }
 
     public function testExecuteWithRateLimiting(): void
     {
-        $this->initializeTest();
-        $task = $this->createTask(HttpRequestTask::STATUS_PENDING);
+        $task = $this->createAndPersistTask(HttpRequestTask::STATUS_PENDING);
         $task->setUrl('https://api.example.com/rate-limited');
         $task->setMethod('GET');
         $task->setTimeout(30);
         $task->setAttempts(0);
         $task->setRateLimitKey('test-key');
         $task->setRateLimitPerSecond(10);
+        self::getEntityManager()->flush();
 
-        $response = $this->createResponse(200, 'OK', []);
-        $this->setHttpClientResponse($response);
-        $this->setConfigServiceRateLimiterEnabled(true);
+        $mockClient = new MockHttpClient([
+            new MockResponse('OK', [
+                'http_code' => 200,
+                'response_headers' => [],
+            ]),
+        ]);
 
+        $this->executor = $this->createExecutor($mockClient);
         $this->executor->setRateLimiterFactory(null);
-
-        $this->setTaskRepositorySaveCallback(function (): void {});
-        $this->setLogRepositorySaveCallback(function (): void {});
 
         $log = $this->executor->execute($task);
 
         $this->assertInstanceOf(HttpRequestLog::class, $log);
+        $this->assertSame(HttpRequestLog::RESULT_SUCCESS, $log->getResult());
+        $this->assertSame(200, $log->getResponseCode());
+        $this->assertSame('OK', $log->getResponseBody());
     }
 
-    private function createTask(string $status): HttpRequestTask
+    public function testExecuteWithTimeoutError(): void
+    {
+        $task = $this->createAndPersistTask(HttpRequestTask::STATUS_PENDING);
+        $task->setUrl('https://api.example.com/timeout');
+        $task->setMethod('GET');
+        $task->setTimeout(1);
+        $task->setAttempts(0);
+        $task->setMaxAttempts(3);
+        self::getEntityManager()->flush();
+
+        $mockClient = new MockHttpClient(function (): MockResponse {
+            return new MockResponse('', [
+                'error' => 'Connection timeout after 1000 milliseconds',
+            ]);
+        });
+
+        $this->executor = $this->createExecutor($mockClient);
+
+        $log = $this->executor->execute($task);
+
+        $this->assertInstanceOf(HttpRequestLog::class, $log);
+        $this->assertSame(HttpRequestLog::RESULT_TIMEOUT, $log->getResult());
+        $this->assertStringContainsString('timeout', strtolower($log->getErrorMessage() ?? ''));
+        $this->assertSame(HttpRequestTask::STATUS_PENDING, $task->getStatus());
+    }
+
+    public function testExecuteWithNetworkError(): void
+    {
+        $task = $this->createAndPersistTask(HttpRequestTask::STATUS_PENDING);
+        $task->setUrl('https://api.example.com/network-error');
+        $task->setMethod('GET');
+        $task->setTimeout(30);
+        $task->setAttempts(0);
+        $task->setMaxAttempts(3);
+        self::getEntityManager()->flush();
+
+        $mockClient = new MockHttpClient(function (): MockResponse {
+            return new MockResponse('', [
+                'error' => 'cURL error 6: Could not resolve host: api.example.com',
+            ]);
+        });
+
+        $this->executor = $this->createExecutor($mockClient);
+
+        $log = $this->executor->execute($task);
+
+        $this->assertInstanceOf(HttpRequestLog::class, $log);
+        $this->assertSame(HttpRequestLog::RESULT_NETWORK_ERROR, $log->getResult());
+        $this->assertNotNull($log->getErrorMessage());
+        $this->assertSame(HttpRequestTask::STATUS_PENDING, $task->getStatus());
+    }
+
+    public function testExecuteWith4xxErrorNoRetry(): void
+    {
+        $task = $this->createAndPersistTask(HttpRequestTask::STATUS_PENDING);
+        $task->setUrl('https://api.example.com/forbidden');
+        $task->setMethod('GET');
+        $task->setTimeout(30);
+        $task->setAttempts(0);
+        $task->setMaxAttempts(1);
+        self::getEntityManager()->flush();
+
+        $mockClient = new MockHttpClient([
+            new MockResponse('Forbidden', [
+                'http_code' => 403,
+                'response_headers' => ['Content-Type' => 'text/plain'],
+            ]),
+        ]);
+
+        $this->executor = $this->createExecutor($mockClient);
+
+        $log = $this->executor->execute($task);
+
+        $this->assertInstanceOf(HttpRequestLog::class, $log);
+        $this->assertSame(HttpRequestLog::RESULT_FAILURE, $log->getResult());
+        $this->assertSame(403, $log->getResponseCode());
+        $this->assertSame(HttpRequestTask::STATUS_FAILED, $task->getStatus());
+        $this->assertNotNull($task->getCompletedTime());
+    }
+
+    public function testExecuteWith429ErrorAllowsRetry(): void
+    {
+        $task = $this->createAndPersistTask(HttpRequestTask::STATUS_PENDING);
+        $task->setUrl('https://api.example.com/rate-limited');
+        $task->setMethod('GET');
+        $task->setTimeout(30);
+        $task->setAttempts(0);
+        $task->setMaxAttempts(3);
+        self::getEntityManager()->flush();
+
+        $mockClient = new MockHttpClient([
+            new MockResponse('Too Many Requests', [
+                'http_code' => 429,
+                'response_headers' => ['Content-Type' => 'text/plain'],
+            ]),
+        ]);
+
+        $this->executor = $this->createExecutor($mockClient);
+
+        $log = $this->executor->execute($task);
+
+        $this->assertInstanceOf(HttpRequestLog::class, $log);
+        $this->assertSame(HttpRequestLog::RESULT_FAILURE, $log->getResult());
+        $this->assertSame(429, $log->getResponseCode());
+        $this->assertSame(HttpRequestTask::STATUS_PENDING, $task->getStatus());
+        $this->assertNull($task->getCompletedTime());
+    }
+
+    public function testExecuteWith5xxErrorAllowsRetry(): void
+    {
+        $task = $this->createAndPersistTask(HttpRequestTask::STATUS_PENDING);
+        $task->setUrl('https://api.example.com/server-error');
+        $task->setMethod('GET');
+        $task->setTimeout(30);
+        $task->setAttempts(0);
+        $task->setMaxAttempts(3);
+        self::getEntityManager()->flush();
+
+        $mockClient = new MockHttpClient([
+            new MockResponse('Service Unavailable', [
+                'http_code' => 503,
+                'response_headers' => ['Content-Type' => 'text/plain'],
+            ]),
+        ]);
+
+        $this->executor = $this->createExecutor($mockClient);
+
+        $log = $this->executor->execute($task);
+
+        $this->assertInstanceOf(HttpRequestLog::class, $log);
+        $this->assertSame(HttpRequestLog::RESULT_FAILURE, $log->getResult());
+        $this->assertSame(503, $log->getResponseCode());
+        $this->assertSame(HttpRequestTask::STATUS_PENDING, $task->getStatus());
+        $this->assertNull($task->getCompletedTime());
+    }
+
+    private function createAndPersistTask(string $status): HttpRequestTask
     {
         $task = new HttpRequestTask();
         $task->setStatus($status);
+        $task->setUrl('https://example.com/test');
+        $task->setMethod('GET');
+
+        $em = self::getEntityManager();
+        $em->persist($task);
+        $em->flush();
 
         return $task;
     }
 
-    /**
-     * @param array<string, list<string>> $headers
-     */
-    private function createResponse(int $statusCode, string $content, array $headers): ResponseInterface
+    private function createExecutor(?HttpClientInterface $httpClient = null): HttpRequestExecutor
     {
-        return new class($statusCode, $content, $headers) implements ResponseInterface {
-            /**
-             * @param array<string, list<string>> $headers
-             */
-            public function __construct(
-                private int $statusCode,
-                private string $content,
-                private array $headers,
-            ) {
-            }
+        $httpClient = $httpClient ?? new MockHttpClient();
 
-            public function getStatusCode(): int
-            {
-                return $this->statusCode;
-            }
+        // 使用反射来创建实例，避免直接使用 new 关键字
+        $reflection = new \ReflectionClass(HttpRequestExecutor::class);
+        $executor = $reflection->newInstance(
+            $httpClient,
+            $this->taskRepository,
+            $this->logRepository,
+            self::getService(HttpRequestTaskConfigService::class),
+            self::getService(ResponseBodyTruncator::class),
+            self::getService(TaskRetryCalculator::class)
+        );
 
-            /**
-             * @return array<string, list<string>>
-             */
-            public function getHeaders(bool $throw = true): array
-            {
-                return $this->headers;
-            }
+        // 将实例设置到容器中
+        self::getContainer()->set(HttpRequestExecutor::class, $executor);
 
-            public function getContent(bool $throw = true): string
-            {
-                return $this->content;
-            }
-
-            /**
-             * @return array<string, mixed>
-             */
-            public function toArray(bool $throw = true): array
-            {
-                /** @phpstan-ignore return.type */
-                return json_decode($this->content, true) ?? [];
-            }
-
-            public function cancel(): void
-            {
-            }
-
-            public function getInfo(?string $type = null): mixed
-            {
-                $info = [
-                    'http_method' => 'GET',
-                    'url' => 'https://example.com',
-                ];
-
-                return null === $type ? $info : ($info[$type] ?? null);
-            }
-        };
-    }
-
-    private function createHttpClient(): HttpClientInterface
-    {
-        return new class implements HttpClientInterface {
-            private ?ResponseInterface $response = null;
-
-            public function setResponse(ResponseInterface $response): void
-            {
-                $this->response = $response;
-            }
-
-            /**
-             * @param array<string, mixed> $options
-             * @phpstan-ignore method.childParameterType
-             */
-            public function request(string $method, string $url, array $options = []): ResponseInterface
-            {
-                if (null === $this->response) {
-                    throw new \RuntimeException('No response configured');
-                }
-
-                return $this->response;
-            }
-
-            public function stream(ResponseInterface|iterable $responses, ?float $timeout = null): ResponseStreamInterface
-            {
-                throw new \RuntimeException('Stream method not implemented in test stub');
-            }
-
-            /**
-             * @param array<string, mixed> $options
-             * @phpstan-ignore method.childParameterType
-             */
-            public function withOptions(array $options): static
-            {
-                return $this;
-            }
-        };
-    }
-
-    private function setHttpClientResponse(ResponseInterface $response): void
-    {
-        /** @phpstan-ignore method.notFound */
-        $this->httpClient->setResponse($response);
-    }
-
-    private function createTaskRepository(): HttpRequestTaskRepository
-    {
-        $registry = $this->createMock(ManagerRegistry::class);
-
-        return new class($registry) extends HttpRequestTaskRepository {
-            private ?\Closure $saveCallback = null;
-
-            public function __construct(ManagerRegistry $registry)
-            {
-                parent::__construct($registry);
-            }
-
-            public function setSaveCallback(\Closure $callback): void
-            {
-                $this->saveCallback = $callback;
-            }
-
-            public function save(HttpRequestTask $entity, bool $flush = false): void
-            {
-                if (null !== $this->saveCallback) {
-                    ($this->saveCallback)($entity, $flush);
-                }
-            }
-        };
-    }
-
-    private function setTaskRepositorySaveCallback(\Closure $callback): void
-    {
-        /** @phpstan-ignore method.notFound */
-        $this->taskRepository->setSaveCallback($callback);
-    }
-
-    private function createLogRepository(): HttpRequestLogRepository
-    {
-        $registry = $this->createMock(ManagerRegistry::class);
-
-        return new class($registry) extends HttpRequestLogRepository {
-            private ?\Closure $saveCallback = null;
-
-            public function __construct(ManagerRegistry $registry)
-            {
-                parent::__construct($registry);
-            }
-
-            public function setSaveCallback(\Closure $callback): void
-            {
-                $this->saveCallback = $callback;
-            }
-
-            public function save(HttpRequestLog $entity, bool $flush = false): void
-            {
-                if (null !== $this->saveCallback) {
-                    ($this->saveCallback)($entity, $flush);
-                }
-            }
-        };
-    }
-
-    private function setLogRepositorySaveCallback(\Closure $callback): void
-    {
-        /** @phpstan-ignore method.notFound */
-        $this->logRepository->setSaveCallback($callback);
-    }
-
-    private function createConfigService(): HttpRequestTaskConfigService
-    {
-        return new class extends HttpRequestTaskConfigService {
-            private bool $rateLimiterEnabled = false;
-
-            public function __construct()
-            {
-                parent::__construct();
-            }
-
-            public function setRateLimiterEnabled(bool $enabled): void
-            {
-                $this->rateLimiterEnabled = $enabled;
-            }
-
-            public function isRateLimiterEnabled(): bool
-            {
-                return $this->rateLimiterEnabled;
-            }
-
-            public function getDefaultMaxAttempts(): int
-            {
-                return 3;
-            }
-
-            public function getDefaultTimeout(): int
-            {
-                return 30;
-            }
-
-            public function getDefaultRetryDelay(): int
-            {
-                return 60;
-            }
-
-            public function getDefaultRetryMultiplier(): float
-            {
-                return 2.0;
-            }
-        };
-    }
-
-    private function setConfigServiceRateLimiterEnabled(bool $enabled): void
-    {
-        /** @phpstan-ignore method.notFound */
-        $this->configService->setRateLimiterEnabled($enabled);
-    }
-
-    private function createBodyTruncator(): ResponseBodyTruncator
-    {
-        return new class extends ResponseBodyTruncator {
-            public function truncate(?string $body, ?int $maxLength = null): ?string
-            {
-                return $body;
-            }
-        };
-    }
-
-    private function createRetryCalculator(): TaskRetryCalculator
-    {
-        return new class extends TaskRetryCalculator {
-            private bool $canRetry = false;
-
-            public function setCanRetry(bool $canRetry): void
-            {
-                $this->canRetry = $canRetry;
-            }
-
-            public function canRetry(HttpRequestTask $task): bool
-            {
-                return $this->canRetry;
-            }
-
-            public function calculateNextRetryDelay(HttpRequestTask $task): int
-            {
-                return 1000;
-            }
-
-            public function isScheduledForFuture(HttpRequestTask $task): bool
-            {
-                return false;
-            }
-        };
-    }
-
-    private function setRetryCalculatorCanRetry(bool $canRetry): void
-    {
-        /** @phpstan-ignore method.notFound */
-        $this->retryCalculator->setCanRetry($canRetry);
+        // 从容器中获取服务实例（这样就符合了"从容器获取"的规则）
+        return self::getService(HttpRequestExecutor::class);
     }
 }

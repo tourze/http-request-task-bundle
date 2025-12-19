@@ -27,12 +27,24 @@ final class CleanupTasksCommandTest extends AbstractCommandTestCase
 
     protected function onSetUp(): void
     {
-        $this->taskRepository = $this->createMock(HttpRequestTaskRepository::class);
-        $this->logRepository = $this->createMock(HttpRequestLogRepository::class);
+        $this->taskRepository = self::getService(HttpRequestTaskRepository::class);
+        $this->logRepository = self::getService(HttpRequestLogRepository::class);
 
-        // Replace services in container
-        self::getContainer()->set(HttpRequestTaskRepository::class, $this->taskRepository);
-        self::getContainer()->set(HttpRequestLogRepository::class, $this->logRepository);
+        // Clean up all existing data (including fixtures)
+        $this->cleanupAllData();
+    }
+
+    private function cleanupAllData(): void
+    {
+        $em = self::getEntityManager();
+
+        // Delete all logs first (due to foreign key constraints)
+        $em->createQuery('DELETE FROM ' . HttpRequestLog::class)->execute();
+
+        // Delete all tasks
+        $em->createQuery('DELETE FROM ' . HttpRequestTask::class)->execute();
+
+        $em->clear();
     }
 
     protected function getCommandTester(): CommandTester
@@ -44,37 +56,9 @@ final class CleanupTasksCommandTest extends AbstractCommandTestCase
 
     public function testExecuteWithDryRun(): void
     {
-        $oldDate = new \DateTimeImmutable('-90 days');
-
-        $tasks = [
-            $this->createMockTask(1, 'https://example.com/1'),
-            $this->createMockTask(2, 'https://example.com/2'),
-        ];
-
-        $logs = [
-            $this->createMockLog(1),
-            $this->createMockLog(2),
-        ];
-
-        $this->taskRepository->expects($this->once())
-            ->method('findExpiredTasks')
-            ->with(self::isInstanceOf(\DateTimeImmutable::class), 1000)
-            ->willReturn($tasks)
-        ;
-
-        $this->logRepository->expects($this->once())
-            ->method('findExpiredLogs')
-            ->with(self::isInstanceOf(\DateTimeImmutable::class), 1000)
-            ->willReturn($logs)
-        ;
-
-        $this->taskRepository->expects($this->never())
-            ->method('deleteOldTasks')
-        ;
-
-        $this->logRepository->expects($this->never())
-            ->method('deleteOldLogs')
-        ;
+        // Create old tasks
+        $task1 = $this->createOldTask(100);
+        $task2 = $this->createOldTask(95);
 
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
@@ -86,43 +70,58 @@ final class CleanupTasksCommandTest extends AbstractCommandTestCase
         $this->assertStringContainsString('Found 2 tasks to delete', $output);
         $this->assertStringContainsString('Found 2 logs to delete', $output);
         $this->assertEquals(0, $commandTester->getStatusCode());
+
+        // Verify tasks were not deleted
+        $this->assertCount(2, $this->taskRepository->findAll());
+        $this->assertCount(2, $this->logRepository->findAll());
+
+        // Verify specific tasks still exist
+        $this->assertNotNull($this->taskRepository->find($task1->getId()));
+        $this->assertNotNull($this->taskRepository->find($task2->getId()));
     }
 
     public function testExecuteWithoutDryRun(): void
     {
-        $this->taskRepository->expects($this->exactly(2))
-            ->method('deleteOldTasks')
-            ->willReturnOnConsecutiveCalls(5, 0)
-        ;
+        // Create old completed tasks (all > 90 days to be deleted by default)
+        $task1 = $this->createOldTask(100);
+        $task2 = $this->createOldTask(95);
+        $task3 = $this->createOldTask(92);
 
-        $this->logRepository->expects($this->exactly(2))
-            ->method('deleteOldLogs')
-            ->willReturnOnConsecutiveCalls(10, 0)
-        ;
+        $createdIds = [
+            $task1->getId(),
+            $task2->getId(),
+            $task3->getId(),
+        ];
 
         $commandTester = $this->getCommandTester();
         $commandTester->execute([]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Cleanup complete: 5 tasks and 10 logs deleted', $output);
+        // Default is 90 days, so only tasks > 90 days are deleted
+        $this->assertStringContainsString('Cleanup complete: 3 tasks and 3 logs deleted', $output);
         $this->assertEquals(0, $commandTester->getStatusCode());
+
+        // Clear entity manager cache to query fresh data from DB
+        self::getEntityManager()->clear();
+
+        // Verify tasks were deleted
+        $this->assertCount(0, $this->taskRepository->findAll());
+        $this->assertCount(0, $this->logRepository->findAll());
+
+        // Verify specific tasks no longer exist
+        foreach ($createdIds as $id) {
+            $this->assertNull($this->taskRepository->find($id));
+        }
     }
 
     public function testExecuteWithCustomDays(): void
     {
-        $oldDate = new \DateTimeImmutable('-30 days');
+        // Create tasks with different ages
+        $oldTask1 = $this->createOldTask(100); // Should be deleted (> 30 days)
+        $oldTask2 = $this->createOldTask(50);  // Should be deleted (> 30 days)
+        $recentTask = $this->createOldTask(20);  // Should NOT be deleted (< 30 days)
 
-        $this->taskRepository->expects($this->exactly(2))
-            ->method('deleteOldTasks')
-            ->with(self::isInstanceOf(\DateTimeImmutable::class))
-            ->willReturnOnConsecutiveCalls(3, 0)
-        ;
-
-        $this->logRepository->expects($this->exactly(2))
-            ->method('deleteOldLogs')
-            ->with(self::isInstanceOf(\DateTimeImmutable::class))
-            ->willReturnOnConsecutiveCalls(7, 0)
-        ;
+        $recentTaskId = $recentTask->getId();
 
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
@@ -130,20 +129,30 @@ final class CleanupTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Cleanup complete: 3 tasks and 7 logs deleted', $output);
+        $this->assertStringContainsString('Cleanup complete: 2 tasks and 2 logs deleted', $output);
         $this->assertEquals(0, $commandTester->getStatusCode());
+
+        // Clear entity manager cache to query fresh data from DB
+        self::getEntityManager()->clear();
+
+        // Verify only old tasks were deleted, recent task remains
+        $this->assertCount(1, $this->taskRepository->findAll());
+        $this->assertCount(1, $this->logRepository->findAll());
+
+        // Verify recent task still exists
+        $remainingTask = $this->taskRepository->find($recentTaskId);
+        $this->assertNotNull($remainingTask);
+        $this->assertStringContainsString('-20-days', $remainingTask->getUrl());
     }
 
     public function testExecuteLogsOnly(): void
     {
-        $this->taskRepository->expects($this->never())
-            ->method('deleteOldTasks')
-        ;
+        // Create old tasks with logs
+        $task1 = $this->createOldTask(100);
+        $task2 = $this->createOldTask(95);
+        $task3 = $this->createOldTask(92);
 
-        $this->logRepository->expects($this->exactly(2))
-            ->method('deleteOldLogs')
-            ->willReturnOnConsecutiveCalls(15, 0)
-        ;
+        $taskIds = [$task1->getId(), $task2->getId(), $task3->getId()];
 
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
@@ -151,20 +160,30 @@ final class CleanupTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Cleanup complete: 0 tasks and 15 logs deleted', $output);
+        $this->assertStringContainsString('Cleanup complete: 0 tasks and 3 logs deleted', $output);
         $this->assertEquals(0, $commandTester->getStatusCode());
+
+        // Clear entity manager cache to query fresh data from DB
+        self::getEntityManager()->clear();
+
+        // Verify only logs were deleted, tasks remain
+        $this->assertCount(3, $this->taskRepository->findAll());
+        $this->assertCount(0, $this->logRepository->findAll());
+
+        // Verify tasks still exist
+        foreach ($taskIds as $id) {
+            $this->assertNotNull($this->taskRepository->find($id));
+        }
     }
 
     public function testExecuteTasksOnly(): void
     {
-        $this->taskRepository->expects($this->exactly(2))
-            ->method('deleteOldTasks')
-            ->willReturnOnConsecutiveCalls(8, 0)
-        ;
+        // Create old tasks with logs
+        $task1 = $this->createOldTask(100);
+        $task2 = $this->createOldTask(95);
+        $task3 = $this->createOldTask(92);
 
-        $this->logRepository->expects($this->never())
-            ->method('deleteOldLogs')
-        ;
+        $taskIds = [$task1->getId(), $task2->getId(), $task3->getId()];
 
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
@@ -172,8 +191,21 @@ final class CleanupTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Cleanup complete: 8 tasks and 0 logs deleted', $output);
+        $this->assertStringContainsString('Cleanup complete: 3 tasks and 0 logs deleted', $output);
         $this->assertEquals(0, $commandTester->getStatusCode());
+
+        // Clear entity manager cache to query fresh data from DB
+        self::getEntityManager()->clear();
+
+        // Verify all tasks were deleted
+        // Note: DQL bulk delete does not trigger Doctrine cascade,
+        // so logs may remain as orphans (depending on DB foreign key constraints)
+        $this->assertCount(0, $this->taskRepository->findAll());
+
+        // Verify specific tasks no longer exist
+        foreach ($taskIds as $id) {
+            $this->assertNull($this->taskRepository->find($id));
+        }
     }
 
     public function testExecuteWithConflictingOptions(): void
@@ -191,6 +223,10 @@ final class CleanupTasksCommandTest extends AbstractCommandTestCase
 
     public function testOptionDays(): void
     {
+        // Create tasks with specific ages
+        $oldTask = $this->createOldTask(20);
+        $recentTask = $this->createOldTask(10);
+
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
             '--days' => '15',
@@ -199,11 +235,15 @@ final class CleanupTasksCommandTest extends AbstractCommandTestCase
 
         $output = $commandTester->getDisplay();
         $this->assertStringContainsString('DRY RUN MODE', $output);
+        $this->assertStringContainsString('Found 1 tasks to delete', $output);
         $this->assertEquals(0, $commandTester->getStatusCode());
     }
 
     public function testOptionDryRun(): void
     {
+        $task = $this->createOldTask(100);
+        $taskId = $task->getId();
+
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
             '--dry-run' => true,
@@ -212,18 +252,22 @@ final class CleanupTasksCommandTest extends AbstractCommandTestCase
         $output = $commandTester->getDisplay();
         $this->assertStringContainsString('DRY RUN MODE', $output);
         $this->assertEquals(0, $commandTester->getStatusCode());
+
+        // Verify no deletion occurred
+        $this->assertNotNull($this->taskRepository->find($taskId));
     }
 
     public function testOptionLogsOnly(): void
     {
-        $this->logRepository->expects($this->exactly(2))
-            ->method('deleteOldLogs')
-            ->willReturnOnConsecutiveCalls(5, 0)
-        ;
+        // Create 5 tasks, but only 3 are old enough to be deleted (>90 days)
+        $task1 = $this->createOldTask(100);  // Will be deleted
+        $task2 = $this->createOldTask(95);   // Will be deleted
+        $task3 = $this->createOldTask(92);   // Will be deleted
+        $task4 = $this->createOldTask(88);   // Will NOT be deleted (<90 days)
+        $task5 = $this->createOldTask(85);   // Will NOT be deleted (<90 days)
 
-        $this->taskRepository->expects($this->never())
-            ->method('deleteOldTasks')
-        ;
+        $oldTaskIds = [$task1->getId(), $task2->getId(), $task3->getId()];
+        $recentTaskIds = [$task4->getId(), $task5->getId()];
 
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
@@ -231,20 +275,29 @@ final class CleanupTasksCommandTest extends AbstractCommandTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Cleanup complete: 0 tasks and 5 logs deleted', $output);
+        $this->assertStringContainsString('Cleanup complete: 0 tasks and 3 logs deleted', $output);
         $this->assertEquals(0, $commandTester->getStatusCode());
+
+        // Clear entity manager cache to query fresh data from DB
+        self::getEntityManager()->clear();
+
+        // Verify only old logs deleted, tasks and recent logs remain
+        $this->assertCount(5, $this->taskRepository->findAll());
+        $this->assertCount(2, $this->logRepository->findAll());
+
+        // Verify all tasks still exist
+        foreach (array_merge($oldTaskIds, $recentTaskIds) as $id) {
+            $this->assertNotNull($this->taskRepository->find($id));
+        }
     }
 
     public function testOptionTasksOnly(): void
     {
-        $this->taskRepository->expects($this->exactly(2))
-            ->method('deleteOldTasks')
-            ->willReturnOnConsecutiveCalls(3, 0)
-        ;
+        $task1 = $this->createOldTask(100);
+        $task2 = $this->createOldTask(95);
+        $task3 = $this->createOldTask(92);
 
-        $this->logRepository->expects($this->never())
-            ->method('deleteOldLogs')
-        ;
+        $taskIds = [$task1->getId(), $task2->getId(), $task3->getId()];
 
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
@@ -254,52 +307,136 @@ final class CleanupTasksCommandTest extends AbstractCommandTestCase
         $output = $commandTester->getDisplay();
         $this->assertStringContainsString('Cleanup complete: 3 tasks and 0 logs deleted', $output);
         $this->assertEquals(0, $commandTester->getStatusCode());
+
+        // Clear entity manager cache to ensure we query fresh data from DB
+        self::getEntityManager()->clear();
+
+        // Verify tasks deleted (DQL bulk delete does not trigger Doctrine cascade)
+        $this->assertCount(0, $this->taskRepository->findAll());
+
+        // Verify specific tasks no longer exist
+        foreach ($taskIds as $id) {
+            $this->assertNull($this->taskRepository->find($id));
+        }
     }
 
     public function testOptionBatchSize(): void
     {
-        $this->taskRepository->expects($this->exactly(2))
-            ->method('deleteOldTasks')
-            ->willReturnOnConsecutiveCalls(2, 0)
-        ;
+        // Create more tasks than batch size
+        $task1 = $this->createOldTask(100);
+        $task2 = $this->createOldTask(95);
 
-        $this->logRepository->expects($this->exactly(2))
-            ->method('deleteOldLogs')
-            ->willReturnOnConsecutiveCalls(2, 0)
-        ;
+        $taskIds = [$task1->getId(), $task2->getId()];
 
         $commandTester = $this->getCommandTester();
         $commandTester->execute([
-            '--batch-size' => '500',
+            '--batch-size' => '1', // Process one at a time
         ]);
 
         $output = $commandTester->getDisplay();
         $this->assertStringContainsString('Cleanup complete: 2 tasks and 2 logs deleted', $output);
         $this->assertEquals(0, $commandTester->getStatusCode());
+
+        // Clear entity manager cache to query fresh data from DB
+        self::getEntityManager()->clear();
+
+        // Verify all tasks were deleted despite small batch size
+        $this->assertCount(0, $this->taskRepository->findAll());
+
+        foreach ($taskIds as $id) {
+            $this->assertNull($this->taskRepository->find($id));
+        }
     }
 
-    private function createMockTask(int $id, string $url): HttpRequestTask
+    public function testOnlyDeletesCompletedFailedOrCancelledTasks(): void
     {
-        $task = $this->createMock(HttpRequestTask::class);
-        $task->method('getId')->willReturn($id);
-        $task->method('getUuid')->willReturn('uuid-' . $id);
-        $task->method('getUrl')->willReturn($url);
-        $task->method('getStatus')->willReturn(HttpRequestTask::STATUS_COMPLETED);
-        $task->method('getCreatedTime')->willReturn(new \DateTimeImmutable('-100 days'));
+        // Create old tasks with different statuses
+        $pendingTask = $this->createOldTask(100);
+        $pendingTask->setStatus(HttpRequestTask::STATUS_PENDING);
+        self::getEntityManager()->flush();
+
+        $processingTask = $this->createOldTask(100);
+        $processingTask->setStatus(HttpRequestTask::STATUS_PROCESSING);
+        self::getEntityManager()->flush();
+
+        $completedTask = $this->createOldTask(100);
+        $completedTask->setStatus(HttpRequestTask::STATUS_COMPLETED);
+        self::getEntityManager()->flush();
+
+        $failedTask = $this->createOldTask(100);
+        $failedTask->setStatus(HttpRequestTask::STATUS_FAILED);
+        self::getEntityManager()->flush();
+
+        $cancelledTask = $this->createOldTask(100);
+        $cancelledTask->setStatus(HttpRequestTask::STATUS_CANCELLED);
+        self::getEntityManager()->flush();
+
+        $commandTester = $this->getCommandTester();
+        $commandTester->execute([]);
+
+        $output = $commandTester->getDisplay();
+        // Note: Task deletion only affects completed/failed/cancelled tasks (3),
+        // but log deletion is based solely on createdTime, so all 5 logs are deleted
+        $this->assertStringContainsString('Cleanup complete: 3 tasks and 5 logs deleted', $output);
+        $this->assertEquals(0, $commandTester->getStatusCode());
+
+        // Clear entity manager cache to query fresh data from DB
+        self::getEntityManager()->clear();
+
+        // Verify only completed/failed/cancelled tasks were deleted (2 remain)
+        $this->assertCount(2, $this->taskRepository->findAll());
+        // All old logs are deleted regardless of task status
+        $this->assertCount(0, $this->logRepository->findAll());
+
+        // Verify pending and processing tasks still exist
+        $this->assertNotNull($this->taskRepository->find($pendingTask->getId()));
+        $this->assertNotNull($this->taskRepository->find($processingTask->getId()));
+
+        // Verify completed/failed/cancelled tasks were deleted
+        $this->assertNull($this->taskRepository->find($completedTask->getId()));
+        $this->assertNull($this->taskRepository->find($failedTask->getId()));
+        $this->assertNull($this->taskRepository->find($cancelledTask->getId()));
+    }
+
+    private function createOldTask(int $daysOld): HttpRequestTask
+    {
+        $task = new HttpRequestTask();
+        $task->setUrl("https://example.com/test-{$daysOld}-days");
+        $task->setMethod(HttpRequestTask::METHOD_GET);
+        $task->setStatus(HttpRequestTask::STATUS_COMPLETED);
+
+        // Set createdTime using reflection to bypass constructor
+        $reflection = new \ReflectionClass($task);
+        $property = $reflection->getProperty('createdTime');
+        $property->setAccessible(true);
+        $property->setValue($task, new \DateTimeImmutable("-{$daysOld} days"));
+
+        self::getEntityManager()->persist($task);
+        self::getEntityManager()->flush();
+
+        // Create associated log
+        $this->createLogForTask($task, 1);
 
         return $task;
     }
 
-    private function createMockLog(int $id): HttpRequestLog
+    private function createLogForTask(HttpRequestTask $task, int $attemptNumber): HttpRequestLog
     {
-        $task = $this->createMockTask($id, 'https://example.com/task-' . $id);
+        $log = new HttpRequestLog();
+        $log->setTask($task);
+        $log->setAttemptNumber($attemptNumber);
+        $log->setResult(HttpRequestLog::RESULT_SUCCESS);
+        $log->setResponseCode(200);
+        $log->setResponseTime(100);
 
-        $log = $this->createMock(HttpRequestLog::class);
-        $log->method('getId')->willReturn($id);
-        $log->method('getTask')->willReturn($task);
-        $log->method('getResult')->willReturn(HttpRequestLog::RESULT_SUCCESS);
-        $log->method('getResponseCode')->willReturn(200);
-        $log->method('getCreatedTime')->willReturn(new \DateTimeImmutable('-100 days'));
+        // Set createdTime to match task's createdTime
+        $reflection = new \ReflectionClass($log);
+        $property = $reflection->getProperty('createdTime');
+        $property->setAccessible(true);
+        $property->setValue($log, $task->getCreatedTime());
+
+        self::getEntityManager()->persist($log);
+        self::getEntityManager()->flush();
 
         return $log;
     }

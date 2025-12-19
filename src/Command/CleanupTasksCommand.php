@@ -19,7 +19,7 @@ use Tourze\HttpRequestTaskBundle\Repository\HttpRequestTaskRepository;
     name: self::NAME,
     description: 'Clean up old HTTP request tasks and logs'
 )]
-class CleanupTasksCommand extends Command
+final class CleanupTasksCommand extends Command
 {
     public const NAME = 'http-request-task:cleanup';
 

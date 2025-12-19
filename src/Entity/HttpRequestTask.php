@@ -394,6 +394,14 @@ class HttpRequestTask implements \Stringable
         return $this->createdTime;
     }
 
+    /**
+     * @internal This method is only for testing purposes
+     */
+    public function setCreatedTimeForTesting(\DateTimeImmutable $createdTime): void
+    {
+        $this->createdTime = $createdTime;
+    }
+
     public function getUpdatedTime(): \DateTimeImmutable
     {
         return $this->updatedTime;

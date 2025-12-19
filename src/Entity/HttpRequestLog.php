@@ -224,6 +224,14 @@ class HttpRequestLog implements \Stringable
         return $this->createdTime;
     }
 
+    /**
+     * @internal This method is only for testing purposes
+     */
+    public function setCreatedTimeForTesting(\DateTimeImmutable $createdTime): void
+    {
+        $this->createdTime = $createdTime;
+    }
+
     public function __toString(): string
     {
         return sprintf(

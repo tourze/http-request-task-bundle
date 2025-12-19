@@ -201,12 +201,8 @@ final class HttpRequestTaskRepositoryTest extends AbstractRepositoryTestCase
         $expiredTask->setMethod(HttpRequestTask::METHOD_GET);
         $expiredTask->setStatus(HttpRequestTask::STATUS_COMPLETED);
 
-        // 使用反射设置 createdTime 为旧日期
-        /** @phpstan-ignore-next-line */
-        $reflection = new \ReflectionClass($expiredTask);
-        $property = $reflection->getProperty('createdTime');
-        $property->setAccessible(true);
-        $property->setValue($expiredTask, new \DateTimeImmutable('2023-01-01 10:00:00'));
+        // 设置 createdTime 为旧日期
+        $expiredTask->setCreatedTimeForTesting(new \DateTimeImmutable('2023-01-01 10:00:00'));
 
         $recentTask = new HttpRequestTask();
         $recentTask->setUrl('https://api.example.com/recent');
